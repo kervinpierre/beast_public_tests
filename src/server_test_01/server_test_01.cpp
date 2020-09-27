@@ -343,6 +343,8 @@ public:
                 ///
                 /// Testing incremental reads.  E.g. for uploading very large files.
                 ///
+                /// See example: https://www.boost.org/doc/libs/1_71_0/libs/beast/doc/html/beast/using_http/parser_stream_operations/incremental_read.html
+                ///
                 ///////////////////////////////////////////////////////////////////////
 
                 yield stream_.async_read_some( buffer_.prepare( 1024 ), beast::bind_front_handler(
