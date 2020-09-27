@@ -19,6 +19,7 @@
 #include <boost/asio/coroutine.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/config.hpp>
+#include  <boost/format.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -262,6 +263,19 @@ class session
     std::shared_ptr<void> res_;
     send_lambda lambda_;
 
+    ///////////////////////////////////////////////
+    ///
+    /// Testing declarations
+    ///
+    ///////////////////////////////////////////////
+    boost::optional<boost::beast::http::request_parser<boost::beast::http::buffer_body>> pr_;
+    char                                                                                 pr_buffer_[2048];
+    ///////////////////////////////////////////////
+    ///
+    /// End testing declarations
+    ///
+    ///////////////////////////////////////////////
+   
 public:
     // Take ownership of the socket
     explicit
@@ -289,9 +303,19 @@ public:
             beast::error_code ec,
             std::size_t bytes_transferred )
     {
+        size_t processed_octets = 0;
+
         boost::ignore_unused( bytes_transferred );
         reenter( *this )
         {
+            // A new HTTP parser is required for each message
+            std::cout << std::endl << "Creating new parser: emplace()";
+            pr_.emplace();
+
+            // Set some limits to discourage attackers.
+            pr_->body_limit( 500U * 1024U * 1024U * 1024U );
+            //pr_->header_limit(2048);
+
             for (;;)
             {
                 // Make the request empty before reading,
@@ -301,20 +325,90 @@ public:
                 // Set the timeout.
                 stream_.expires_after( std::chrono::seconds( 30 ) );
 
-                // Read a request
-                yield http::async_read( stream_, buffer_, req_,
-                                        beast::bind_front_handler(
-                                            &session::loop,
-                                            shared_from_this(),
-                                            false ) );
-                if (ec == http::error::end_of_stream)
-                {
-                    // The remote host closed the connection
-                    break;
-                }
-                if (ec)
-                    return fail( ec, "read" );
+                //// Read a request
+                //yield http::async_read( stream_, buffer_, req_,
+                //                        beast::bind_front_handler(
+                //                            &session::loop,
+                //                            shared_from_this(),
+                //                            false ) );
+                //if (ec == http::error::end_of_stream)
+                //{
+                //    // The remote host closed the connection
+                //    break;
+                //}
+                //if (ec)
+                //    return fail( ec, "read" );
 
+                ///////////////////////////////////////////////////////////////////////
+                ///
+                /// Testing incremental reads.  E.g. for uploading very large files.
+                ///
+                ///////////////////////////////////////////////////////////////////////
+
+                yield stream_.async_read_some( buffer_.prepare( 1024 ), beast::bind_front_handler(
+                                                &session::loop,
+                                                shared_from_this(),
+                                                false ) );
+                if (ec)
+                {
+                    std::cout << std::endl << ec.message();
+                }
+                buffer_.commit( bytes_transferred );
+
+                std::cout << std::endl << boost::format( "async_read_some() : %d" ) % buffer_.size();
+
+                ec = boost::system::error_code();
+
+                // Set up the body for writing into our small buffer
+                pr_->get().body().data = pr_buffer_;
+                pr_->get().body().size = sizeof( pr_buffer_ );
+                pr_->get().body().more = !pr_->is_done();
+
+                // TODO: KP. check error code
+                // auto pr_res = pr_->put(buffer_, ec);
+                processed_octets = pr_->put( buffer_.data(), ec );
+                if (ec)
+                {
+                    std::cout << std::endl << boost::format( "ec = %d, %s" ) % ec.value() % ec.message();
+
+                    if (ec == boost::beast::http::error::need_more)
+                    {
+                        // https://www.boost.org/doc/libs/develop/libs/beast/doc/html/beast/ref/boost__beast__http__parser/put.html
+                        // need_more implies more data is needed for forward progress
+                        ec = {};
+                    }
+                    else
+                    {
+                        std::cout << std::endl << boost::format( "Parser failed." );
+                    }
+                }
+                else if (processed_octets > 0)
+                {
+                    // forward progress was made
+                    std::cout << std::endl << boost::format( "%d octets processed" ) %  processed_octets;
+                }
+                else
+                {
+                    std::cout << std::endl << boost::format( "%d octets returned. Progress not made." ) % processed_octets;
+                }
+
+                buffer_.consume( buffer_.size() );
+
+                std::cout << std::endl << boost::format( "storage data: '%s'" ) % (char*)(buffer_.data().data());
+                std::cout << std::endl << boost::format( "storage capacity: '%d'" ) % buffer_.capacity();
+                std::cout << std::endl << boost::format( "storage size: '%d'" ) % buffer_.size() ;
+
+                std::cout << std::endl << boost::format( "parser buffer size: '%d'" ) % sizeof( pr_buffer_ );
+                std::cout << std::endl << boost::format( "parser buffer data: '%s'" ) % pr_buffer_;
+
+                std::cout << std::endl << std::endl;
+
+                ///////////////////////////////////////////////////////
+                ///
+                /// End Test
+                ///
+                ///////////////////////////////////////////////////////
+                
                 // Send the response
                 yield handle_request( *doc_root_, std::move( req_ ), lambda_ );
                 if (ec)
